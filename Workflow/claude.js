@@ -2,10 +2,7 @@
 
 // Helpers
 function envVar(varName) {
-  return $.NSProcessInfo
-    .processInfo
-    .environment
-    .objectForKey(varName).js
+  return $.NSProcessInfo.processInfo.environment.objectForKey(varName).js
 }
 
 function fileExists(path) {
@@ -38,6 +35,8 @@ function appendChat(path, message) {
   writeFile(path, chatString)
 }
 
+// MARK: markdown chat
+
 function markdownChat(messages, ignoreLastInterrupted = true) {
   return messages.reduce((accumulator, current, index, allMessages) => {
     if (current["role"] === "assistant")
@@ -46,7 +45,7 @@ function markdownChat(messages, ignoreLastInterrupted = true) {
     if (current["role"] === "user") {
       const userMessage = current["content"].split("\n").map(line => `### ${line}`).join("\n") // support multi-line questions (e.g. via External Trigger)
       const userTwice = allMessages[index + 1]?.["role"] === "user" // "user" role twice in a row
-      const lastMessage = index === allMessages.length - 1 // "user is last message
+      const lastMessage = index === allMessages.length - 1 // "user is last message"
 
       return userTwice || (lastMessage && !ignoreLastInterrupted) ?
         `${accumulator}${userMessage}\n\n[Answer Interrupted]\n\n` :
@@ -58,33 +57,40 @@ function markdownChat(messages, ignoreLastInterrupted = true) {
   }, "")
 }
 
-function startStream(apiEndpoint, apiKey, apiOrgHeader, model, systemPrompt, ongoingChat, streamFile, pidStreamFile) {
-  $.NSFileManager.defaultManager.createFileAtPathContentsAttributes(streamFile, undefined, undefined) // Create empty file
+// MARK: start stream
 
-  const messages = systemPrompt ?
-    [{ role: "system", content: systemPrompt }].concat(ongoingChat) :
-    ongoingChat
+function startStream(apiEndpoint, apiKey, maxTokens, model, systemPrompt, ongoingChat, streamFile, pidStreamFile) {
+
+  $.NSFileManager.defaultManager.createFileAtPathContentsAttributes(streamFile, undefined, undefined) // Create empty file
 
   const task = $.NSTask.alloc.init
   const stdout = $.NSPipe.pipe
+  const messages = ongoingChat
+  const data = JSON.stringify({ system: systemPrompt, model: model, messages: messages, max_tokens: maxTokens, stream: true }) // 256 // 1024 // 3072 // max: 4096
 
   task.executableURL = $.NSURL.fileURLWithPath("/usr/bin/curl")
+  
+  // Anthropic 
   task.arguments = [
-    `${apiEndpoint}/v1/chat/completions`,
+    `${apiEndpoint}/v1/messages`,
     "--speed-limit", "0", "--speed-time", "5", // Abort stalled connection after a few seconds
-    "--silent", "--no-buffer",
-    "--header", "Content-Type: application/json",
-    "--header", `Authorization: Bearer ${apiKey}`,
-    "--data", JSON.stringify({ model: model, messages: messages, stream: true }),
+    "--header", "anthropic-version: 2023-06-01",
+    "--header", "anthropic-beta: messages-2023-12-15",
+    "--header", "content-type: application/json",
+    "--header", `x-api-key: ${apiKey}`,
+    "--data", data,
     "--output", streamFile
-  ].concat(apiOrgHeader)
+  ]
 
   task.standardOutput = stdout
   task.launchAndReturnError(false)
   writeFile(pidStreamFile, task.processIdentifier.toString())
 }
 
+// MARK: read stream
+
 function readStream(streamFile, chatFile, pidStreamFile) {
+
   const streamMarker = envVar("stream_marker") === "1"
   const streamString = $.NSString.stringWithContentsOfFileEncodingError(streamFile, $.NSUTF8StringEncoding, undefined).js
 
@@ -102,6 +108,9 @@ function readStream(streamFile, chatFile, pidStreamFile) {
       const errorMessage = JSON.parse(streamString)["error"]["message"]
 
       if (errorMessage) {
+
+        console.log(`Error message! ${errorMessage}`)
+
         // Delete stream files
         deleteFile(streamFile)
         deleteFile(pidStreamFile)
@@ -109,29 +118,41 @@ function readStream(streamFile, chatFile, pidStreamFile) {
         return JSON.stringify({
           response: `[${errorMessage}]  \n(${(new Date).toUTCString()})`, // Surround in square brackets to look like other messages
           behaviour: { response: "replacelast" }
-        })
+        });
       }
 
       throw "Could not determine error message" // Fallback to the catch
-    } catch {
-      // If it's not an error from the API, log file contents
-      console.log(streamString)
+    } catch (error) {
 
       return JSON.stringify({
-        response: streamString,
+        response: `[Unexpected error occurred] ${error}  \n(${new Date().toUTCString()})`,
         behaviour: { response: "replacelast" }
-      })
+      });
     }
   }
+
+  //streamString = streamString.replace(/"\n\n/g, "\"[[NEWLINE]][[NEWLINE]]");
+  //streamString = streamString.replace(/"\n/g, "\"[[NEWLINE]]");
 
   // Parse streaming response
   const chunks = streamString
     .split("\n") // Split into lines
-    .map(item => item.replace(/^data: /, "")) // Remove extraneous "data: "
-    .filter(item => item.startsWith("{")) // Only grab lines which could be expected JSON
-    .map(item => JSON.parse(item)) // Parse as JSON
+    .map(item => item.replace(/^data: /, "")) // Remove extraneous leading "data: {..."
+    .filter(item => item.startsWith("{"))     // Only grab lines which could be expected JSON
+    .map(item => parseLine(item))             // Parse JSON ~~and restore newlines~~
 
-  const responseText = chunks.map(item => item["choices"][0]?.["delta"]["content"]).join("")
+  function parseLine(line) {
+    try {
+      //const json = JSON.parse(line.replace("[[NEWLINE]]", "\\n"))
+      const json = JSON.parse(line)
+      return json
+    } catch (error) {
+      //return JSON.parse(`{"delta":{"text":"🔴"}}`)
+      return JSON.parse(`{"delta":{"text":" ..."}}`)
+    }
+  }
+
+  const responseText = chunks.map(c => c?.delta?.text).join("")
 
   // If File not modified for over 5 seconds, connection stalled
   const stalled = new Date().getTime() - fileModified(streamFile) > 5000
@@ -147,7 +168,7 @@ function readStream(streamFile, chatFile, pidStreamFile) {
     // Stop
     return JSON.stringify({
       response: `${responseText} [Connection Stalled]`,
-      footer: "You can ask ChatGPT to continue the answer",
+      footer: "You can ask Claude to continue the answer",
       behaviour: { response: "replacelast", scroll: "end" }
     })
   }
@@ -159,15 +180,15 @@ function readStream(streamFile, chatFile, pidStreamFile) {
   })
 
   // Last token finish reason
-  const finishReason = chunks.slice(-1)[0]["choices"][0]["finish_reason"]
+  const finishReason = chunks.slice(-2)[0]?.delta?.stop_reason // Claude
 
   // If reponse is not finished, continue loop
-  if (finishReason === null) return JSON.stringify({
+  if (finishReason === undefined) return JSON.stringify({
     rerun: 0.1,
     variables: { streaming_now: true },
     response: responseText,
     behaviour: { response: "replacelast", scroll: "end" }
-  })
+  });
 
   // When finished, write history and delete stream files
   appendChat(chatFile, { role: "assistant", content: responseText })
@@ -175,31 +196,36 @@ function readStream(streamFile, chatFile, pidStreamFile) {
   deleteFile(pidStreamFile)
 
   // Mention finish reason in footer
-  const footerText = (function() {
+  const footerText = (function () {
     switch (finishReason) {
-      case "legth": return "Maximum number of tokens reached"
-      case "content_filter": return "Content was omitted due to a flag from OpenAI content filters"
+      case "max_tokens": return "Maximum number of output tokens reached" // claude
+      //case "content_filter": return "Content was omitted due to a flag from OpenAI content filters"
+      //default: return `"Finish-Reason: ${finishReason || "<undefined>"}"` // debug claude
     }
   })()
 
   // Stop
   return JSON.stringify({
+    //variables: { streaming_now: false },
     response: responseText,
     footer: footerText,
     behaviour: { response: "replacelast", scroll: "end" }
-  })
+  });
 }
 
-// Main
+
+// MARK: main
+
 function run(argv) {
   // Constant data
   const typedQuery = argv[0]
   const maxEntries = 100
-  const apiKey = envVar("openai_api_key")
-  const apiOrgHeader = envVar("openai_org_id") ? ["--header", `OpenAI-Organization: ${envVar("openai_org_id")}`] : []
-  const apiEndpoint = envVar("chatgpt_api_endpoint") || "https://api.openai.com"
+  const apiKey = envVar("anthropic_api_key")
+  const maxTokens = Number(envVar("claude_max_tokens")) || 512
+  const apiEndpoint = envVar("claude_api_endpoint") || "https://api.anthropic.com"
   const systemPrompt = envVar("system_prompt")
-  const model = envVar("chatgpt_model_override") ? envVar("chatgpt_model_override") : envVar("gpt_model")
+  const model = envVar("claude_model_override") ? envVar("claude_model_override") : envVar("gpt_model")
+
   const chatFile = `${envVar("alfred_workflow_data")}/chat.json`
   const pidStreamFile = `${envVar("alfred_workflow_cache")}/pid.txt`
   const streamFile = `${envVar("alfred_workflow_cache")}/stream.txt`
@@ -231,7 +257,7 @@ function run(argv) {
   const ongoingChat = previousChat.concat(appendQuery)
 
   // Make API request, write chat file, and start loop
-  startStream(apiEndpoint, apiKey, apiOrgHeader, model, systemPrompt, ongoingChat, streamFile, pidStreamFile)
+  startStream(apiEndpoint, apiKey, maxTokens, model, systemPrompt, ongoingChat, streamFile, pidStreamFile)
   appendChat(chatFile, appendQuery)
 
   return JSON.stringify({
