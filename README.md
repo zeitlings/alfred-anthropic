@@ -31,7 +31,7 @@ Query Claude via the `claude` keyword, the [Universal Action](https://www.alfred
 
 #### Chat History
 
-View Chat History with ⌥↩ in the `chatgpt` keyword. Each result shows the first question as the title and the last as the subtitle.
+View Chat History with <kbd>⌥</kbd><kbd>↩</kbd> in the `claude` keyword. Each result shows the first question as the title and the last as the subtitle.
 
 ![Viewing chat histories](Workflow/images/about/claudehistory.png)
 
