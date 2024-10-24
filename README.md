@@ -4,6 +4,13 @@ This is a modified version of the official Alfred ChatGPT workflow to interact w
 
 <a href="https://github.com/zeitlings/alfred-anthropic/releases/latest"><img src="https://img.shields.io/github/v/release/zeitlings/alfred-anthropic.svg" alt="GitHub Release"></a>
 
+
+> [!NOTE]
+> The Claude AI workflow is no longer actively maintained.  
+> It has been superseded by **[Ayai · GPT Nexus](https://github.com/zeitlings/ayai-gpt-nexus)**, which implements Claude and other providers. 
+
+
+
 ---
 
 ## Setup
